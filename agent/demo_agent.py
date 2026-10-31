@@ -556,6 +556,12 @@ class Simulator:
         self.history_lock = Lock()
         self.titled: set[tuple[str, str]] = set()
         self.thread_context: dict[tuple[str, str], str] = {}
+        # Keys the user clicked Slack's native Stop button on (agent_session_
+        # stopped). Checked inside the streaming loop so an in-flight reply
+        # halts instead of continuing to append into a session Slack already
+        # closed. Cleared once the in-flight reply observes and handles it.
+        self.stopped_sessions: set[tuple[str, str]] = set()
+        self.stopped_sessions_lock = Lock()
         # Cache of Slack user display names, so the bot can be told who it's
         # talking to and avoid the "who are you?" failure mode on "my tasks"
         # style questions. None means lookup failed — still cached so we
@@ -631,6 +637,8 @@ class Simulator:
                 self._handle_thread_started(req.payload)
             elif etype == "assistant_thread_context_changed":
                 self._handle_context_changed(req.payload)
+            elif etype == "agent_session_stopped":
+                self._handle_session_stopped(event)
         except Exception:
             log.exception("Error handling event %s", etype)
             audit_log(f":warning: {self.display_name} error on `{etype}`:\n```{traceback.format_exc()[:1500]}```")
@@ -660,6 +668,27 @@ class Simulator:
             log.info("context changed: thread=%s now viewing channel=%s", thread_ts, ctx_channel)
         else:
             self.thread_context.pop((channel, thread_ts), None)
+
+    def _handle_session_stopped(self, event: dict[str, Any]) -> None:
+        """User clicked Slack's native Stop button on a streaming agent reply.
+
+        Per Slack's spec: don't post to the channel or call any session-status
+        method here — Slack already updated the session status on its own.
+        Just flag the key so an in-flight _stream_reply loop (if any) halts
+        instead of continuing to append into a session Slack already closed.
+        """
+        channel = event.get("channel")
+        thread_ts = event.get("thread_ts")
+        if not channel or not thread_ts:
+            return
+        key = (channel, thread_ts)
+        with self.stopped_sessions_lock:
+            self.stopped_sessions.add(key)
+        log.info("agent_session_stopped: channel=%s thread=%s", channel, thread_ts)
+        audit_log(
+            f":octagonal_sign: {self.display_name} session stopped by user in "
+            f"<#{channel}> (thread `{thread_ts}`) — halting in-flight reply."
+        )
 
     def _handle_message(self, event: dict[str, Any], *, is_dm: bool) -> None:
         if _should_skip_event(event, self.bot_user_id, self.bot_id):
@@ -859,6 +888,29 @@ class Simulator:
                 f"(final flush failed; placeholder may remain)"
             )
 
+    def _finalize_stopped_stream(self, channel: str, ts: str | None, buf: str) -> None:
+        """Close a Slack streaming message the user halted via the native
+        Stop button (agent_session_stopped). Unlike _finalize_dropped_stream,
+        this appends no "connection dropped" note — Slack's own UI already
+        shows the session was stopped, and the spec says not to add commentary
+        on this event. Just flush whatever was buffered and close cleanly.
+        Never raises."""
+        if not ts:
+            return
+        try:
+            if buf:
+                _retrying_append_stream(self.web, channel=channel, ts=ts, markdown_text=buf)
+        except SlackApiError as e:
+            err = e.response.get("error")
+            hints = e.response.get("response_metadata", {}).get("messages") or []
+            log.error("stop-finalize appendStream failed: %s (%s)", err, hints)
+        try:
+            _retrying_stop_stream(self.web, channel=channel, ts=ts)
+        except SlackApiError as e:
+            err = e.response.get("error")
+            hints = e.response.get("response_metadata", {}).get("messages") or []
+            log.error("stop-finalize stopStream failed: %s (%s)", err, hints)
+
     def _finalize_dropped_stream(self, channel: str, ts: str | None, buf: str) -> None:
         """Close a Slack streaming message that was interrupted mid-reply
         (claude CLI subprocess died, network blip, etc.). Flushes any buffered
@@ -1010,6 +1062,24 @@ class Simulator:
                 messages=messages,
             )
             for event_type, payload in stream_iter:
+                key = (channel, thread_ts)
+                with self.stopped_sessions_lock:
+                    stopped = key in self.stopped_sessions
+                    if stopped:
+                        self.stopped_sessions.discard(key)
+                if stopped:
+                    # User hit Slack's native Stop button mid-reply. Per
+                    # Slack's spec: don't post more content, don't call any
+                    # session-status method — just finalize whatever placeholder
+                    # we have open (if any) and stop consuming the subprocess.
+                    # Breaking out here (instead of exhausting stream_iter) lets
+                    # claude_subprocess.stream_reply's `finally` kill the
+                    # subprocess on GC.
+                    log.info("stream halted by agent_session_stopped: %s", key)
+                    if started_streaming:
+                        self._finalize_stopped_stream(channel, ts, buf)
+                    loading_stop.set()
+                    return (buf or "(stopped)"), EMPTY_USAGE
                 if event_type == "error":
                     # If the subprocess errored mid-stream (after we opened
                     # the Slack placeholder), don't let the traceback splash

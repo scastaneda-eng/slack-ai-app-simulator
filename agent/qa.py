@@ -332,9 +332,14 @@ def _run_self_test() -> int:
             shim.blockkit_enabled = blockkit_enabled
             shim.taskplan_enabled = taskplan_enabled
             shim.stream = True
+            shim.stopped_sessions = set()
+            shim.stopped_sessions_lock = Lock()
             return shim
 
-        def _run_stream_case(events, *, blockkit_enabled: bool = True, taskplan_enabled: bool = False):
+        def _run_stream_case(
+            events, *, blockkit_enabled: bool = True, taskplan_enabled: bool = False,
+            pre_stopped: bool = False,
+        ):
             def fake_stream_reply(**_kwargs):
                 yield from events
 
@@ -343,6 +348,8 @@ def _run_self_test() -> int:
             shim_case = _make_stream_shim(
                 web_case, blockkit_enabled=blockkit_enabled, taskplan_enabled=taskplan_enabled
             )
+            if pre_stopped:
+                shim_case.stopped_sessions.add(("C123", "thread.1"))
             reply, _usage = Simulator._stream_reply(
                 shim_case,
                 "C123",
@@ -490,6 +497,71 @@ def _run_self_test() -> int:
             print(
                 "[self-test] FAIL taskplan stream: "
                 f"starts={len(tp_starts)} stops={len(tp_stops)} raw_leak={len(tp_raw)}"
+            )
+
+        # agent_session_stopped mid-stream: streaming is already under way
+        # (chat.startStream succeeded, deltas flowing), then the flag flips.
+        # The loop must halt on the next event, finalize the open placeholder
+        # with whatever was buffered so far, and NOT append the later text.
+        def _stopping_stream(shim, n_before_stop):
+            def gen():
+                for i, text in enumerate([
+                    "Part one. ", "Part two. ", "Part three. ",
+                    "NEVER_APPENDED part four.", "NEVER_APPENDED part four.",
+                ]):
+                    if i == n_before_stop:
+                        shim.stopped_sessions.add(("C123", "thread.1"))
+                    kind = "final" if i == 4 else "delta"
+                    yield (kind, text)
+            return gen()
+
+        web_mid = _RecWeb()
+        shim_mid = _make_stream_shim(web_mid, blockkit_enabled=False)
+
+        def fake_stream_reply_mid(**_kwargs):
+            yield from _stopping_stream(shim_mid, n_before_stop=3)
+
+        _demo_agent_mod.stream_reply = fake_stream_reply_mid
+        stop_mid_reply, _usage = Simulator._stream_reply(
+            shim_mid, "C123", "thread.1", "U123", "system",
+            [{"role": "user", "content": "go"}], Event(),
+        )
+        stop_mid_calls = web_mid.calls
+        stop_mid_starts = [c for c in stop_mid_calls if c[0] == "startStream"]
+        stop_mid_appends_after_stop = [
+            c for c in stop_mid_calls
+            if c[0] == "appendStream" and "NEVER_APPENDED" in c[1].get("markdown_text", "")
+        ]
+        stop_mid_stops = [c for c in stop_mid_calls if c[0] == "stopStream"]
+        if stop_mid_starts and stop_mid_stops and not stop_mid_appends_after_stop:
+            print("[self-test] OK   stream reply: agent_session_stopped halts mid-stream cleanly")
+        else:
+            fail += 1
+            print(
+                "[self-test] FAIL agent_session_stopped mid-stream: "
+                f"starts={len(stop_mid_starts)} stops={len(stop_mid_stops)} "
+                f"leaked_appends={len(stop_mid_appends_after_stop)} reply={stop_mid_reply!r}"
+            )
+
+        # agent_session_stopped on a short reply (stop flag set before the
+        # loop even sees a "final" event) — must return immediately without
+        # ever calling chat.postMessage with the answer text.
+        stop_short_reply, stop_short_calls = _run_stream_case(
+            [("final", "Quick answer.")],
+            blockkit_enabled=False,
+            pre_stopped=True,
+        )
+        stop_short_posts = [
+            c for c in stop_short_calls
+            if c[0] == "postMessage" and "Quick answer." in c[1].get("text", "")
+        ]
+        if not stop_short_posts:
+            print("[self-test] OK   stream reply: agent_session_stopped halts before short reply posts")
+        else:
+            fail += 1
+            print(
+                f"[self-test] FAIL agent_session_stopped short reply leaked a post: "
+                f"posts={len(stop_short_posts)} reply={stop_short_reply!r}"
             )
 
         web = _RecWeb()
