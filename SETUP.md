@@ -121,6 +121,73 @@ You'll see a new `.venv/` folder appear — that's the sandboxed Python install.
 
 ---
 
+## Optional — manage this app with the Slack CLI
+
+This is the weakest CLI fit of the bunch, because the simulator runs as a standalone process (not via `slack run`), so Socket Mode's `xapp-` token and the bot `xoxb-` token still come from the Slack UI. The CLI here only saves you the manifest paste in this step.
+
+You do **not** need the Slack CLI for this toolkit. This is a convenience for
+people who'd rather create the app and manage its manifest from the terminal
+instead of the Slack web UI.
+
+**What the CLI does here:** creates the app and applies/updates its manifest
+without the browser.
+**What it does *not* do:** it will not hand you the app-level `xapp-` token or
+the bot `xoxb-` token — you still copy those from the Slack UI in Steps 5–7
+below. Socket Mode tokens are minted on the app's App-Level Tokens page
+(Step 5); the CLI only manages `xapp-` automatically when an app runs under
+`slack run`, which this simulator does not.
+
+1. **Install the Slack CLI and sign in (one-time per machine).**
+   Install it from the official guide
+   (https://docs.slack.dev/tools/slack-cli/), then:
+   ```bash
+   slack login
+   ```
+
+2. **Make the CLI aware of this app's manifest (one-time in this folder).**
+   Create a one-line hook file so CLI manifest commands read the
+   `manifest.json` the wizard generated in Step 1:
+   ```bash
+   mkdir -p .slack
+   printf '{ "hooks": { "get-manifest": "cat manifest.json" } }\n' > .slack/hooks.json
+   ```
+
+3. **Bring the app under CLI management — pick one:**
+   - **You already created the app** in the steps above (most people): link it.
+     ```bash
+     slack app link --app <APP_ID> --team <TEAM_ID>
+     ```
+     `<APP_ID>` (starts with `A`) is on your app's **Basic Information** page;
+     `<TEAM_ID>` (starts with `T`; on Enterprise Grid you may be prompted for
+     a workspace grant) is your workspace ID. Linking records those IDs in
+     `.slack/` so `slack` commands target this app.
+   - **Starting fresh** (no app yet): preview then create + install from the
+     `manifest.json` the wizard generated in Step 1.
+     ```bash
+     slack manifest info          # preview the manifest the CLI will apply
+     slack app install
+     ```
+     On Enterprise Grid, `slack app install` may prompt you for a workspace
+     grant instead of needing extra flags. Read the new App ID any time with:
+     ```bash
+     jq -r '.default_team.app_id' .slack/apps.json
+     ```
+
+4. **Push later manifest edits** (only if you edited `manifest.json`):
+   ```bash
+   slack app install --update
+   ```
+
+5. **Return to Step 5 (app-level token) and Step 7 (bot token)** to copy your
+   token — that part is unchanged.
+
+> The CLI does not print your bot/user token, and (for parity with the docs)
+> `slack app link` only records the App ID and Team ID; it does not fetch a
+> manifest. Which manifest "wins" is governed by the `manifest.source`
+> setting in `.slack/config.json`, not by linking.
+
+---
+
 ## Step 4 — `[Slack web UI]` Install the app to your workspace
 
 1. Still on your app's page at api.slack.com, click **Install to Workspace** (or **Install to Org** for Enterprise Grid).
@@ -235,7 +302,8 @@ To stop the app cleanly, press `Ctrl+C`. To restart after any change, `Ctrl+C` t
 2. Within ~2 seconds you should see a loading indicator rotate under the bot's name: *"is thinking..."*, then *"is drafting..."*, etc.
 3. After ~7–10 seconds a streamed reply should appear.
 4. If your bot has Block Kit enabled (Block Kit is Slack's structured-card renderer — the thing that turns JSON into nice-looking message cards, Asana-style), ask it something structured like "show me the blockers" or "give me a status summary" — the reply should render as a card, not raw JSON.
-5. Invite the bot to any channel (`/invite @<display_name>`), then `@<display_name> ping`. A reply should appear in-thread.
+5. If your bot has taskplan enabled (the animated "Searched… → Found…" task cards / plan checklist that some research apps show while they work), ask a multi-step question like "research X and tell me what's blocking it". You should see a short animated sequence of task cards before the answer lands in the same message. A quick one-line question won't trigger it — that's expected.
+6. Invite the bot to any channel (`/invite @<display_name>`), then `@<display_name> ping`. A reply should appear in-thread.
 
 If any of those fail, check your audit channel (if you set one up). Each error logs a specific reason.
 
@@ -322,6 +390,8 @@ Each persona still needs its own Slack app + tokens if you want them to appear a
 **"ERROR: Another simulator instance is already running (PID ...)"** — A second `./run_app.sh` can't run while a first is live. Either stop the first (`Ctrl+C` in that Terminal) or `kill <PID>`, then start again. This guard prevents two instances from racing over the Socket Mode connection (Slack delivers events to the last-connected instance, which creates baffling "the bot answered once then stopped" bugs).
 
 **I renamed the bot but Slack's typing indicator still shows the old name** — The typing indicator uses the bot's Slack profile `real_name`, which isn't controlled by `config/app_config.json` `display_name` or the manifest. To change it, go to **api.slack.com → your app → Bot User → Edit** and update the name there. Calling `users.profile.set` from code does not work for bot tokens (it returns `not_allowed_token_type`).
+
+**The task-card animation doesn't appear, or raw `taskplan` JSON shows up in the message** — The streaming task cards need `slack-sdk` 3.40 or newer (the chunk models didn't exist before then). Re-run `.venv/bin/pip install -r requirements.txt` to pick up the bumped pin, then `Ctrl+C` the app and `./run_app.sh` again. Also confirm `"taskplan_enabled": true` is set in `config/app_config.json` for the persona you're running.
 
 ---
 
