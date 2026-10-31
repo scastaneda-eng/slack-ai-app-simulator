@@ -9,8 +9,8 @@
       "display_name": "{{DISPLAY_NAME}}",
       "always_online": true
     },
-    "assistant_view": {
-      "assistant_description": "Ask {{DISPLAY_NAME}} for help.",
+    "agent_view": {
+      "agent_description": "Ask {{DISPLAY_NAME}} for help.",
       "suggested_prompts": []
     }
   },

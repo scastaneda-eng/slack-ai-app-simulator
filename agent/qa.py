@@ -825,6 +825,7 @@ def _run_self_test() -> int:
         + len(taskplan_cases)
         + 2  # taskplan renderer assertions
         + 1  # taskplan stream-reply case
+        + 2  # agent_session_stopped stream-reply cases (mid-stream, short-reply)
         + 3 + 2 + 3 + 4
     )
     print(f"\nself-test: {total - fail} pass / {fail} fail")
