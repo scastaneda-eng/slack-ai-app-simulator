@@ -72,6 +72,8 @@ The app **does not hot-reload.** Any of these edits require Ctrl+C and re-runnin
 
 When you make any of these edits for the SE, **end your message with an explicit restart reminder**: *"Go to your Terminal window running the app, press Ctrl+C to stop it, then run `./run_app.sh` again. The new changes will load on startup."*
 
+**`manifest.json` edit + Slack client hard-refresh (confirmed live 2026-10-30).** After the SE reinstalls the app from an edited manifest (e.g. a feature block like `agent_view` changed), a UI feature tied to that change may not show up in Slack even though the manifest-level change took effect server-side — the client was showing a cached view. Tell the SE to fully quit Slack (Cmd+Q on Mac, not just closing the window) and relaunch before concluding a manifest-level feature "isn't working."
+
 ## What you must NOT do
 
 - **Don't hardcode Anthropic API keys, Bedrock URLs, or bearer tokens.** This project deliberately uses the `claude` CLI so every SE inherits their own auth. If something looks like it needs an API key, stop and check — you're probably on the wrong path.
